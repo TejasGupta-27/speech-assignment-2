@@ -1,0 +1,7 @@
+{
+  "probe_wav": "outputs/parallel_probe.wav",
+  "synth_wav": "outputs/parallel_synth_xtts.wav",
+  "mcd_db": 139.73960861851162,
+  "target": 8.0,
+  "pass": false
+}

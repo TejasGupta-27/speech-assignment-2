@@ -1,0 +1,50 @@
+{
+  "eng->hin": {
+    "eng->hin": 0,
+    "eng->sil": 0,
+    "hin->eng": 0,
+    "hin->sil": 0,
+    "sil->eng": 0,
+    "sil->hin": 0
+  },
+  "eng->sil": {
+    "eng->hin": 0,
+    "eng->sil": 0,
+    "hin->eng": 0,
+    "hin->sil": 0,
+    "sil->eng": 0,
+    "sil->hin": 0
+  },
+  "hin->eng": {
+    "eng->hin": 0,
+    "eng->sil": 0,
+    "hin->eng": 1,
+    "hin->sil": 0,
+    "sil->eng": 0,
+    "sil->hin": 0
+  },
+  "hin->sil": {
+    "eng->hin": 0,
+    "eng->sil": 0,
+    "hin->eng": 0,
+    "hin->sil": 0,
+    "sil->eng": 0,
+    "sil->hin": 0
+  },
+  "sil->eng": {
+    "eng->hin": 0,
+    "eng->sil": 0,
+    "hin->eng": 0,
+    "hin->sil": 0,
+    "sil->eng": 0,
+    "sil->hin": 0
+  },
+  "sil->hin": {
+    "eng->hin": 0,
+    "eng->sil": 0,
+    "hin->eng": 0,
+    "hin->sil": 0,
+    "sil->eng": 0,
+    "sil->hin": 0
+  }
+}

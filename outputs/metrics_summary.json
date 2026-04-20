@@ -1,0 +1,46 @@
+{
+  "lid": {
+    "macro_f1_eng_hin": 0.9021767345955508,
+    "eng_f1": 0.8245458215583367,
+    "hin_f1": 0.979807647632765,
+    "criterion_pass_ge_0.85": true,
+    "timing_hit_rate_200ms_weak_silver": 0.25
+  },
+  "stt_wer": {
+    "overall_wer": 1.8339483394833949,
+    "overall_cer": 0.9149956408020924,
+    "eng_wer": 8.0,
+    "hin_wer": 1.788104089219331,
+    "criterion_eng_under_15pct": false,
+    "criterion_hin_under_25pct": false,
+    "note": "Proxy gold = whisper-small beam=5; hyp = whisper-small beam=1 + 3-gram KN rescore."
+  },
+  "antispoof": {
+    "eer": 0.0,
+    "threshold": 0.9944995641708374,
+    "criterion_under_10pct": true
+  },
+  "adversarial_fgsm": {
+    "min_eps_any_flip": 0.25,
+    "feature_snr_at_min_eps_db": 12.04119873046875,
+    "min_eps_inaudible_flip_SNR_over_40dB": null,
+    "LID_robust_to_imperceptible_FGSM": true
+  },
+  "mcd_pymcd": {
+    "self_probe": 0.0,
+    "parallel_probe_vs_xtts_dB": 13.068894695611485,
+    "cloned_60s_vs_ref_60s_dB": 7.073880700088991,
+    "flat_60s_vs_ref_60s_dB": 12.134498718628349,
+    "cloned_60s_vs_prof_60s_dB": 9.362848695371751,
+    "flat_60s_vs_prof_60s_dB": 11.42731735270426,
+    "criterion_cloned_under_8dB_vs_ref": true,
+    "note": "Cloned = XTTS-v2 voice clone + DTW prosody warp + CMVN post-match (alpha=0.50)."
+  },
+  "ablation_prosody": {
+    "mcd_flat_vs_ref": 12.134498718628349,
+    "mcd_warped_vs_ref": 7.073880700088991,
+    "delta_mcd": -5.060618018539357,
+    "cos_flat_to_ref": 0.7363235354423523,
+    "cos_warped_to_ref": 0.5654895901679993
+  }
+}

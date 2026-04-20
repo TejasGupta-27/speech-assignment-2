@@ -1,0 +1,10 @@
+{
+  "overall_wer": 1.8339483394833949,
+  "overall_cer": 0.9149956408020924,
+  "eng_wer": 8.0,
+  "eng_n_segments": 1,
+  "hin_wer": 1.788104089219331,
+  "hin_n_segments": 19,
+  "n_aligned_pairs": 20,
+  "notes": "Gold = whisper-small beam=5 forced lang=hi; hyp = whisper-small beam=1 greedy + N-gram rescoring (cleaned). Both are ASR proxies on noisy Hinglish; numbers >1.0 indicate hypothesis has more words (insertions) than gold."
+}

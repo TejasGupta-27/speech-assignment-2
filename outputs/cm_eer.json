@@ -1,0 +1,5 @@
+{
+  "eer": 0.0,
+  "threshold": 0.9944995641708374,
+  "weights": "models/cm.pt"
+}

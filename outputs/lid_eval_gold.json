@@ -1,0 +1,43 @@
+{
+  "lid": {
+    "macro_f1_eng_hin": 0.3027040881712162,
+    "report": {
+      "eng": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 0.0
+      },
+      "hin": {
+        "precision": 0.4438598139622287,
+        "recall": 0.9518436429578884,
+        "f1-score": 0.6054081763424324,
+        "support": 24815.0
+      },
+      "sil": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1-score": 0.0,
+        "support": 35185.0
+      },
+      "accuracy": 0.39366666666666666,
+      "macro avg": {
+        "precision": 0.1479532713207429,
+        "recall": 0.3172812143192961,
+        "f1-score": 0.20180272544747746,
+        "support": 60000.0
+      },
+      "weighted avg": {
+        "precision": 0.18357302139121176,
+        "recall": 0.39366666666666666,
+        "f1-score": 0.2503867315989577,
+        "support": 60000.0
+      }
+    }
+  },
+  "timing": {
+    "n_gold": 116,
+    "hit_rate": 0.0,
+    "tol_ms": 200
+  }
+}

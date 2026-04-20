@@ -1,0 +1,71 @@
+{
+  "segment_start_s": 0.0,
+  "segment_end_s": 5.0,
+  "initial_hin_frac": 1.0,
+  "sweep": [
+    {
+      "epsilon": 0.01,
+      "eng_frac": 0.0,
+      "snr_feature_db": 40.000003814697266,
+      "snr_audio_db": -3.0225658416748047,
+      "flipped_majority": false
+    },
+    {
+      "epsilon": 0.05,
+      "eng_frac": 0.0,
+      "snr_feature_db": 26.020601272583008,
+      "snr_audio_db": -3.001929759979248,
+      "flipped_majority": false
+    },
+    {
+      "epsilon": 0.1,
+      "eng_frac": 0.0,
+      "snr_feature_db": 19.999998092651367,
+      "snr_audio_db": -3.0105485916137695,
+      "flipped_majority": false
+    },
+    {
+      "epsilon": 0.25,
+      "eng_frac": 1.0,
+      "snr_feature_db": 12.04119873046875,
+      "snr_audio_db": -2.9989266395568848,
+      "flipped_majority": true
+    },
+    {
+      "epsilon": 0.5,
+      "eng_frac": 1.0,
+      "snr_feature_db": 6.020598888397217,
+      "snr_audio_db": -3.020200252532959,
+      "flipped_majority": true
+    },
+    {
+      "epsilon": 1.0,
+      "eng_frac": 1.0,
+      "snr_feature_db": -7.765790996927535e-07,
+      "snr_audio_db": -3.065394878387451,
+      "flipped_majority": true
+    },
+    {
+      "epsilon": 2.0,
+      "eng_frac": 1.0,
+      "snr_feature_db": -6.02060079574585,
+      "snr_audio_db": -3.26473331451416,
+      "flipped_majority": true
+    },
+    {
+      "epsilon": 5.0,
+      "eng_frac": 1.0,
+      "snr_feature_db": -13.979401588439941,
+      "snr_audio_db": -4.40655517578125,
+      "flipped_majority": true
+    }
+  ],
+  "min_eps_inaudible_flip": null,
+  "min_eps_any_flip": {
+    "epsilon": 0.25,
+    "eng_frac": 1.0,
+    "snr_feature_db": 12.04119873046875,
+    "snr_audio_db": -2.9989266395568848,
+    "flipped_majority": true
+  }
+}
