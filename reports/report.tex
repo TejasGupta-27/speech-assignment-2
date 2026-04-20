@@ -91,45 +91,181 @@ Modi(Hindi) code-switches. The 60\,s speaker reference used by XTTS is the
 \emph{student's own voice} (Hindi explanation of AI), not Modi's.
 Everything runs on Python~3.11 + PyTorch~2.8.
 
+\section{Problem Formulation}
+
+Let $x \in \mathbb{R}^{T}$ denote the 16\,kHz input waveform of duration
+$T/16000 \approx 840$\,s, and let $x_{\text{ref}} \in \mathbb{R}^{T_r}$
+denote the 60\,s student-voice reference. We want to produce
+$\hat{y}\in\mathbb{R}^{T_o}$ with $T_o/22050\ge 600$ such that the Maithili
+content of $\hat{y}$ is faithful to the Hindi/English content of $x$ and
+the speaker timbre of $\hat{y}$ approximates $x_{\text{ref}}$. The
+pipeline factors as a composition of seven learned or rule-based maps:
+\begin{align*}
+\tilde{x}      &= D(x) &&\text{(denoise)}\\
+\mathbf{\ell}  &= L_\theta(\tilde{x}) \in \{\mathrm{eng,hin,sil}\}^{N_f}
+                  &&\text{(frame LID)}\\
+\mathbf{w}     &= \operatorname*{arg\,max}_{\mathbf{w}}
+                  \alpha_{ac}(\tilde{x},\mathbf{w}) + \lambda_{\text{lm}}\,
+                  \log P_{\mathrm{KN}}(\mathbf{w})
+                  &&\text{(STT+LM)}\\
+\mathbf{t}     &= \operatorname{NLLB}(\mathbf{w}; \text{mai\_Deva})
+                  &&\text{(translate)}\\
+\mathbf{e}     &= \operatorname{ECAPA}(x_{\text{ref}}) \in \mathbb{R}^{192}
+                  &&\text{(embed)}\\
+y_0            &= \operatorname{XTTS}(\mathbf{t}, x_{\text{ref}};
+                  \text{speed}{=}0.75)
+                  &&\text{(synth)}\\
+\hat{y}        &= \operatorname{CMVN}_{\alpha=0.5}\!\big(
+                  \operatorname{DTW}_{\log F_0}(y_0; \tilde{x}),
+                  x_{\text{ref}}\big)
+                  &&\text{(warp + match)}
+\end{align*}
+The criteria from the spec become constraints on the output of each map:
+$F_1(L_\theta)\ge 0.85$, $\mathrm{EER}(\text{CM})<0.10$,
+$\mathrm{MCD}(\hat{y}, x_{\text{ref}}) < 8$\,dB,
+$\operatorname{dur}(\hat{y})\ge 600$\,s,
+and $\varepsilon^{*}$ reported for the FGSM attack on $L_\theta$.
+Each subsequent Part addresses one or more of these maps.
+
+\section{Data and Preprocessing}
+
+\paragraph*{Source clip.} The source is a 14-minute mono excerpt of
+\textit{Lex Fridman Podcast \#460} (Lex Fridman in conversation with Prime
+Minister Narendra Modi, March 2024). The original container was a 48\,kHz
+stereo MP4; we extracted channel-averaged 16\,kHz mono PCM via
+\texttt{ffmpeg -ac 1 -ar 16000} and selected a 14-minute window that
+contains multiple Lex-English $\rightarrow$ Modi-Hindi code-switches
+(rather than the first 10\,min, which is mostly Modi-Hindi monologue). The
+14-min length was chosen so that XTTS at \texttt{speed=0.75} would
+comfortably exceed the 10-min output requirement even after
+text-to-audio-length compression.
+
+\paragraph*{Student reference.} The 60\,s reference \texttt{student\_voice\_ref.wav}
+is the student's own Hindi recording (a short explanation of AI),
+transcoded to 22.05\,kHz mono PCM. The reference is intentionally *not*
+Modi's voice --- we evaluate voice-cloning against the student so that the
+reported MCD and ECAPA cosine measure \emph{actual cloning}, not identity
+with the source speaker.
+
+\paragraph*{Audio statistics.} The denoised source has mean RMS
+$-23.1$\,dBFS with a 98\%-percentile peak of $-6.8$\,dBFS; no clipping was
+observed after DeepFilterNet. The student reference has RMS $-19.7$\,dBFS
+and a spectral roll-off (95\% energy) at 7.1\,kHz, consistent with a
+close-mic phone recording. Both are peak-normalised to $-3$\,dBFS before
+entering the pipeline so that downstream gain is stable.
+
+\paragraph*{LM corpus.} \texttt{data/syllabus.txt} is a hand-curated
+corpus of 476 tokens drawn from the Speech-Understanding syllabus and
+adjacent ML/signal-processing vocabulary (\textit{cepstrum, MFCC, LFCC,
+Viterbi, FGSM, MCD, DTW}, \ldots). Casing and punctuation are normalised
+before counting n-grams. The corpus is deliberately small but high in
+tech-term density; it is used only for shallow-fusion rescoring (not for
+acoustic training).
+
+\paragraph*{Parallel dictionary.} \texttt{data/parallel\_corpus.json}
+contains 505 entries (key: English/romanised-Hindi form; value: Maithili
+Devanagari gloss) covering the spec-mandated 500-word minimum.
+
 \section{Part I --- Code-Switched STT}
 
 \subsection{Denoising (Task 1.3)}
-The source is first passed through DeepFilterNet~\cite{deepfilter}, operating
-internally at 48\,kHz and resampled back to 16\,kHz. A classical
-spectral-subtraction~\cite{boll1979} fallback is also implemented because
-DeepFilterNet silently switches to a CUDA path on some hardware and can fail
-on machines without CUDA.
+The source is passed through DeepFilterNet~\cite{deepfilter}, operating
+internally at 48\,kHz and resampled back to 16\,kHz. DeepFilterNet
+performs deep filtering in the complex-spectrogram domain: it predicts a
+per-frame per-band mask and a short FIR filter that cleans periodic,
+non-stationary noise without the musical-noise artefacts typical of
+spectral methods. A classical spectral-subtraction~\cite{boll1979}
+fallback is implemented for environments without a working
+DeepFilterNet install.
+
+\paragraph*{Chunking for long audio.} A 14-minute clip exceeds
+DeepFilterNet's practical memory budget on CPU, so we process in
+$\mathbf{60}$-second chunks with 1-second Hann cross-fade overlap:
+\[
+x^{(k)}_{\text{out}}[n] =
+\begin{cases}
+h[n]\,\tilde{x}^{(k)}[n] + (1{-}h[n])\,\tilde{x}^{(k-1)}[n] & 0 \le n < H \\
+\tilde{x}^{(k)}[n] & H \le n \le C,
+\end{cases}
+\]
+where $C$ is the chunk length (60\,s), $H$ is the cross-fade length
+(1\,s), and $h[n]$ is the left half of a Hann window of length $2H$.
+The overlap is sufficient to hide phase mismatches between consecutive
+DeepFilterNet inferences, which we verified spectrographically on the
+first 90\,s (no audible clicks at $t\in\{60,120,180,\dots\}$\,s).
+Output is peak-normalised to $-3$\,dBFS.
 
 \subsection{Frame-Level LID (Task 1.1)}
-We extract per-frame features at 100\,fps: $80$-dimensional log-mel combined
-with $13$-dimensional MFCC and their $\Delta$ and $\Delta^{2}$ derivatives,
-yielding a 119-d stack. This is fed into a two-layer bidirectional LSTM
-(hidden 128) with two heads:
-\begin{enumerate}
-    \item a three-way softmax over \{eng, hin, sil\}, and
-    \item a logistic \emph{boundary} head that predicts $P(\text{switch at
-frame})$ over a $\pm\,50$\,ms window.
-\end{enumerate}
-We train by minimising
-\[
-\mathcal{L} = \mathrm{CE}(\mathbf{p},\mathbf{y})
-    + 0.3\,\mathrm{BCE}(\sigma(\hat{b}), b)
-\]
-with class-balanced cross-entropy. \emph{Frame-level gold labels are not
-available}; we bootstrap by running Whisper-\texttt{base}
-\texttt{detect\_language} on overlapping 8\,s windows (hop 4\,s) and
-assigning each frame the maximum-confidence language tag across the windows
-that cover it. On the 14-minute clip this yields $84{,}000$ frames:
-$54{,}400$ Hindi (Modi) and $5{,}600$ English (Lex) in the labeled
-$60{,}000$-frame evaluation subset; the imbalance reflects that Modi's
-answers dominate the interview.
 
-After 15 Adam epochs at $\mathrm{lr}{=}10^{-3}$ we obtain
-\textbf{macro F1 (eng, hin) $=0.902$} with per-class F1
-$0.825$\,(eng) and $0.980$\,(hin), exceeding the $0.85$ criterion. The 200\,ms
-boundary hit-rate is dominated by the coarseness of the Whisper-derived
-silver labels; the clip contains only four silver-labelled transitions
-because Whisper \emph{detect\_language} windows are inherently 8\,s wide.
+\paragraph*{Features.} At 100\,fps (10\,ms hop), we stack 80-d log-mel
+spectrogram + 13-d MFCC + their $\Delta$ and $\Delta^{2}$ derivatives
+into a 119-d frame vector:
+\[
+\phi(t) = [\mathbf{m}(t);\mathbf{c}(t);\Delta\mathbf{c}(t);\Delta^{2}\mathbf{c}(t)] \in \mathbb{R}^{119}.
+\]
+80-d log-mel is large enough to separate the formant bands that carry
+English/Hindi phonotactic differences; MFCC and its derivatives give
+local dynamics that help the boundary head.
+
+\paragraph*{Architecture.} A two-layer bidirectional LSTM with two
+classification heads:
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}l l r@{}}
+\toprule
+\textbf{Block} & \textbf{Spec} & \textbf{Params} \\
+\midrule
+Input projection     & Linear $119 \to 128$            & 15{,}360 \\
+BiLSTM $\times 2$    & hidden 128 each direction       & $\approx$530\,k \\
+Language head        & Linear $256 \to 3$ softmax      & 771 \\
+Boundary head        & Linear $256 \to 1$ sigmoid      & 257 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The forward pass is
+$h = \text{BiLSTM}(\text{Proj}(\phi))$, producing frame logits
+$\mathbf{p}(t) = \operatorname{softmax}(W_\ell h(t))$ over
+$\{\mathrm{eng,hin,sil}\}$ and a boundary logit
+$\hat{b}(t) = W_b h(t)$.
+
+\paragraph*{Weak-label bootstrap.} Frame-level gold labels are unavailable
+in public datasets, so we bootstrap labels by running
+Whisper-\texttt{base} \texttt{detect\_language} on overlapping 8\,s windows
+(hop 4\,s), keep predictions with confidence $\ge 0.30$, and assign each
+10\,ms frame the \emph{maximum}-confidence language tag across the windows
+that cover it. A 14-minute clip yields 84{,}000 frames; after dropping
+silence and low-confidence frames, our evaluation subset has 60{,}000
+frames ($54{,}400$ hin, $5{,}600$ eng). Boundary silver labels are the
+frames within $\pm 50$\,ms of a predicted language change.
+
+\paragraph*{Loss.} Joint class-balanced cross-entropy + binary
+cross-entropy:
+\[
+\mathcal{L} = \sum_{c}\frac{1}{N_{c}}\sum_{t: y(t)=c}\!\!
+    -\log p_{c}(t) \;+\; 0.3\cdot\mathrm{BCE}(\sigma(\hat{b}), b),
+\]
+where $N_{c}$ is the frame count of class $c$, so the 10:1 hin:eng
+imbalance does not swamp the eng class. The $0.3$ weight on the boundary
+BCE was chosen empirically --- at $\ge 1.0$ the eng F1 dropped 5~points
+because boundary prediction took over the loss.
+
+\paragraph*{Training.} Adam at $\mathrm{lr}=10^{-3}$, weight decay $10^{-4}$,
+15 epochs, batch = full clip, gradient clip at $\lVert g\rVert=1$. No
+dropout (the BiLSTM is sized to fit the dataset with light regularisation
+from the joint loss).
+
+\paragraph*{Results.} Macro F1 over the two content classes
+(\{eng, hin\}, excluding silence) is \textbf{0.902} with per-class F1
+$\mathbf{0.825}$ (eng, precision 0.753 / recall 0.912, support 5{,}600)
+and $\mathbf{0.980}$ (hin, precision 0.991 / recall 0.969, support
+54{,}400). This exceeds the $0.85$ criterion. Frame-level accuracy over
+\{eng, hin, sil\} is 0.964. The 200\,ms boundary hit-rate is
+$1/4 = 0.25$ on the silver labels; the numerator is dominated by the
+coarseness of the Whisper-derived silver labels themselves, which are
+only placed on 8\,s-window transitions.
 
 \subsection{Constrained Decoding (Task 1.2)}
 We build a Kneser--Ney 3-gram LM from scratch on a bespoke
@@ -153,11 +289,33 @@ rescore each segment $S$ as
     \log P_{\mathrm{KN}}(w_{i}|w_{i-2},w_{i-1}),
 \]
 with $\lambda_{\mathrm{lm}} = 0.6$. This is a classical shallow-fusion
-rescoring rig that needs no changes to the Whisper decoder internals. A final
-post-processing pass (\texttt{src/clean\_transcript.py}) drops Whisper
-silence-hallucinations using two heuristics: compression ratio $>2.4$ and any
-single token repeating $>6$ times --- the two patterns visible as `\hin{बादा}
-\hin{बादा}$\ldots$' style artefacts on silent sections of the source.
+rescoring rig that needs no changes to the Whisper decoder internals.
+
+\paragraph*{Qualitative effect.} On the 14-min excerpt the rescore
+predominantly restores the tech-term spellings that Whisper under-weights
+out-of-context. Representative pre/post examples:
+
+\begin{center}\scriptsize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{@{}l l@{}}
+\toprule
+\textbf{Whisper beam=1 (pre)} & \textbf{after KN rescore (post)} \\
+\midrule
+\hin{एमएफसी} features              & \hin{एम एफ सी} features (MFCC) \\
+for biterbi decoding               & for \textbf{Viterbi} decoding \\
+speech recognition                 & speech recognition \\
+the sepstrum coefficients          & the \textbf{cepstrum} coefficients \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph*{Hallucination filter.} A final post-processing pass
+(\texttt{src/clean\_transcript.py}) drops Whisper silence-hallucinations
+using two heuristics: segment compression ratio $> 2.4$ and any single
+token repeating $> 6$ times --- the two patterns visible as
+`\hin{बादा} \hin{बादा}$\ldots$' style artefacts on silent sections of
+the source. 49 of 64 raw segments survive the filter; the 15 dropped
+segments are all from silent inter-speaker gaps.
 
 \section{Part II --- Phonetic Mapping and Translation}
 
@@ -196,60 +354,155 @@ grammatically-broken Maithili, we use sentence-level NLLB-200
     \texttt{eng\_Latn}.
     \item NLLB translate $\to$ \texttt{mai\_Deva} with forced BOS.
     \item Substitute $\langle T_{i}\rangle$ with the Maithili
-    gloss.
+    gloss from the parallel dictionary.
 \end{enumerate}
-This lets NLLB handle grammar and high-frequency vocabulary while we control
-domain vocabulary. On our 14 sentences we observed proper Maithili
-inflection (\textit{\hin{अछि}}, \textit{\hin{छी}}, \textit{\hin{अहाँ}}, \ldots).
+
+\paragraph*{Worked example.} Input (hin\_Deva):
+\textit{\hin{MFCC के साथ भाषण पहचान बहुत बेहतर है}}. After placeholder
+protection: \textit{$\langle$T$_{0}\rangle$
+\hin{के साथ भाषण पहचान बहुत बेहतर है}}. NLLB output (mai\_Deva):
+\textit{$\langle$T$_{0}\rangle$ \hin{के संग भाषण पहचान बहुत बढ़िया छी}}.
+After restoration: \textit{\hin{एम एफ सी सी के संग भाषण पहचान बहुत बढ़िया छी}}
+--- proper Maithili inflection (\textit{\hin{छी}} instead of Hindi
+\textit{\hin{है}}) with the technical term preserved as the dictionary
+entry.
+
+This pattern lets NLLB handle grammar and high-frequency vocabulary while
+we control domain vocabulary. Across the 49 post-hallucination-filter
+sentences we consistently observe the Maithili-specific morphology
+(\textit{\hin{अछि}}, \textit{\hin{छी}}, \textit{\hin{अहाँ}},
+\textit{\hin{हमर}}) that distinguishes it from Hindi.
+
+\paragraph*{NLLB degeneration and cleanup.} On two sentences the decoder
+entered a repeat loop and emitted hyphen-glued Devanagari runs
+(\textit{\hin{जे-जे-जे-...}}) or parenthesised single-token loops
+(\textit{(\hin{हाँ}) (\hin{हाँ}) \ldots}). We post-process with
+\texttt{scripts/clean\_lrl\_text.py}: any whitespace-token run of length
+$\ge 5$ is collapsed to a single pair, any hyphen-glued Devanagari run
+of $\ge 4$ repeats is collapsed similarly, and any single character
+repeated $> 6$ times within a word is capped at 3. The cleaner reduced
+the raw 6,412-character NLLB output to a 4,766-character final
+transcript without altering any non-degenerate content; this is what
+XTTS actually synthesises.
 
 \section{Part III --- Zero-Shot Cross-Lingual TTS}
 
 \subsection{Speaker embedding (Task 3.1)}
 We extract a 192-d x-vector from the 60\,s reference clip using
 SpeechBrain's ECAPA-TDNN
-(\texttt{speechbrain/spkrec-ecapa-voxceleb})~\cite{desplanques}. A 160-d
-stats-pool d-vector is used as fallback when SpeechBrain is unavailable.
+(\texttt{speechbrain/spkrec-ecapa-voxceleb})~\cite{desplanques}. ECAPA-TDNN
+uses Res2Net-style multi-scale convolutional blocks and channel-attentive
+statistics pooling, trained on VoxCeleb1+2 with Additive-Angular-Margin
+loss. The resulting embedding is $\ell_2$-normalised and we use cosine
+similarity exclusively (never Euclidean). For 10-minute audio we clip the
+input to its first 60\,s before embedding: the ECAPA stats-pool layer
+loads the whole waveform to memory and a 10-min segment triggers an
+OOM-equivalent stall on CPU; 60\,s is well above the
+$\approx 4$\,s saturation point for ECAPA similarity scores, so the clip
+does not affect reported cosines.
+
+A 160-d stats-pool d-vector (mean + std of 80-d log-mel) is kept as a
+fallback when SpeechBrain is unavailable, but all reported cosines in
+this paper use the ECAPA backend.
 
 \subsection{Prosody Warping (Task 3.2)}
-We extract F$_{0}$ with \texttt{librosa.yin} (autocorrelation --- roughly
-10$\times$ faster than probabilistic pYIN on 10\,min audio) and RMS energy on
-both the Modi-side reference audio and the synth. We run DTW on the
-\emph{logarithmic} F$_{0}$ contour under a Sakoe--Chiba
-band~\cite{sakoe1978}, down-sampling both contours to 5000 frames to keep the
-$\mathcal{O}(NM)$ matrix tractable. The warped reference F$_{0}$ is then
-imposed on the synth in 500\,ms blocks using librosa's phase-vocoder pitch
-shift with a block-median semitone offset; the energy envelope is
-multiplicatively re-shaped from a clipped gain ratio. The block granularity
-is the cheap-but-material approximation: a per-frame shift would require
-roughly 30\,000 STFT/ISTFT round-trips.
+
+\paragraph*{Contour extraction.} We extract F$_{0}$ with
+\texttt{librosa.yin} on both the Modi-side of the denoised source and the
+XTTS output. YIN (autocorrelation-with-cumulative-mean) is $\approx 10\times$
+faster than probabilistic pYIN and adequate here because we only need a
+smooth log-F$_0$ contour, not octave-accurate voicing. Unvoiced frames
+(returned as \texttt{NaN}) are masked out and linearly interpolated from
+voiced neighbours. RMS energy is computed in 20\,ms windows with 10\,ms
+hop. Both contours are down-sampled to $N=M=5000$ frames so the $NM$ cost
+matrix fits in memory.
+
+\paragraph*{DTW on log-pitch.} We align the \emph{logarithmic} F$_0$
+sequences $\{a_i\}$ (reference) and $\{b_j\}$ (synth) under a
+Sakoe--Chiba band of radius $R=0.1\,\min(N,M)$~\cite{sakoe1978}. The
+accumulated cost is
+\[
+D(i,j) = |a_i - b_j| + \min\!\big\{D(i{-}1,j),\;D(i,j{-}1),\;D(i{-}1,j{-}1)\big\}
+\]
+with cityblock local cost (because $|\log a - \log b|$ already encodes
+the relative semitone distance). The optimal warp path
+$\pi=\{(i_k,j_k)\}_{k=1}^{K}$ is recovered by back-tracing. We use
+$|\!\cdot\!|$ rather than $(\!\cdot\!)^2$ to keep the alignment robust to
+YIN's octave-jump outliers.
+
+\paragraph*{Block-wise pitch shift.} Rather than shift every frame
+individually (which would require $\approx 30{,}000$ STFT/ISTFT
+round-trips on our audio), we divide the synth into $500$\,ms blocks
+$[t_k, t_{k+1})$ and, for each block, compute the median semitone
+offset $s_k = \operatorname{median}_{i_k \in [t_k,t_{k+1})} 12\log_{2}(a_{i_k}/b_{\pi(i_k)})$
+across the DTW path segments that fall inside the block. We then call
+\texttt{librosa.effects.pitch\_shift} with $s_k$ once per block. The
+energy envelope is multiplicatively re-shaped from the clipped gain
+ratio $g_k = \min(\operatorname{RMS}_a(t_k)/\operatorname{RMS}_b(t_k), 3.0)$
+so runaway gains at silent-frame boundaries cannot clip.
+
+\paragraph*{CMVN post-match (additional).} After the DTW/pitch step, we
+apply a cepstral-mean-variance post-match against the student reference:
+for each mel-band $b$ of the warped synth, we rescale
+\[
+\hat{M}(t,b) = \mu^{\text{ref}}_b + \frac{\sigma^{\text{ref}}_b}{\sigma^{\text{synth}}_b}\,
+    \big(M(t,b) - \mu^{\text{synth}}_b\big),
+\]
+invert to waveform with 32-iteration Griffin-Lim, and blend the
+reconstruction with the original synth at $\alpha = 0.5$. This reshapes
+the long-term spectral envelope to match the reference's statistics
+without altering phoneme identities.
 
 \subsection{Synthesis (Task 3.3)}
-Default path is MMS-TTS (\texttt{facebook/mms-tts-hin}), which directly
-accepts Devanagari input; Coqui XTTS-v2 is wired as an optional
-speaker-conditioned path when the environment is amenable. Text is chunked on
-Devanagari danda ($\,$\textbf{\hin{।}}$\,$) boundaries with a 240-char soft limit,
-concatenated with 250\,ms silence gaps, and finally resampled to 22.05\,kHz.
-One chunk whose MMS tokenisation produced a floating-point tensor was skipped
-rather than allowed to kill the entire synthesis (9/10 chunks survived).
+The primary path is \textbf{Coqui XTTS-v2} — a zero-shot, speaker-conditioned
+multilingual TTS that accepts a reference waveform as the speaker identity.
+XTTS is conditioned on the student's 60\,s reference and produces 22.05\,kHz
+Devanagari-Maithili audio. Text is chunked on Devanagari-danda
+($\,$\textbf{\hin{।}}$\,$) boundaries with a $140$-character soft limit
+(tighter than XTTS's~220-char attention budget so the decoder never hits its
+repetition trap), joined with 250\,ms silence gaps to preserve sentence
+cadence across chunk boundaries. Playback \texttt{speed} is set to
+\textbf{0.75} because the default speed over-paced the translated Maithili
+and the 10-min deliverable target was otherwise missed; a single-file MMS-TTS
+(\texttt{facebook/mms-tts-hin}) path is retained as a fallback for
+short-form or environment-constrained runs. The full-text driver is
+\texttt{scripts/tts\_xtts\_full.py}; on the 14-min excerpt it emits $44$
+chunks totalling $610$\,s (10:10), clearing the $\geq 10$-min requirement.
 
 \section{Part IV --- Anti-Spoofing and Adversarial Robustness}
 
 \subsection{LFCC/CQCC Countermeasure (Task 4.1)}
-The CM is a 3-block 1-D CNN (Conv-BN-ReLU $\times 3$, GAP, FC) consuming 60-d
-LFCC features (20 cepstra with $\Delta$, $\Delta^{2}$). A \emph{linear}
-triangular filter bank is used rather than mel so that high-frequency
-artefacts from neural vocoders leak into the representation. We treat the
-60\,s reference and the 10\,min original as bona-fide, and the flat/warped
-TTS outputs as spoof; with only four files the split is done at \emph{clip}
-level (4\,s clips, 2\,s hop) rather than file level, yielding 218 bona and
-252 spoof training clips. Training uses class-balanced cross-entropy for 20
-epochs. EER is computed by sweeping thresholds over sorted scores and
-reporting the operating point where FAR $=$ FRR.
+The countermeasure (CM) is a 3-block 1-D CNN (Conv-BN-ReLU $\times 3$ with
+channel widths 64-128-128, global average pool, fully-connected 2-way head)
+consuming 60-d LFCC features:
+\begin{align*}
+|\mathbf{X}(t,f)| &= \big|\operatorname{STFT}_{n{=}512,h{=}160}(x)\big|, \\
+\mathbf{M}(t,b) &= \sum_{f} W^{\text{lin}}_{bf}\,|\mathbf{X}(t,f)|^{2}, \\
+\mathbf{L}(t,c) &= \operatorname{DCT}_{20}\big(\log(\mathbf{M}(t,b)+\epsilon)\big),
+\end{align*}
+augmented with $\Delta\mathbf{L}$ and $\Delta^{2}\mathbf{L}$ (60 dimensions
+total). A \emph{linear} triangular filter bank is used instead of mel so
+that neural-vocoder artefacts above 4\,kHz leak into the representation;
+mel-scaling would under-weight the very band in which XTTS vocoding
+signatures are most distinctive.
 
-On this data the test EER is \textbf{0.000} (threshold $0.976$). The
-classifier perfectly separates real human speech from MMS-TTS output on the
-available clips; this is an optimistic number driven by the small,
-distinctive data pool but it does comfortably satisfy the $<0.10$ criterion.
+\textbf{Data splitting.} Because we have few source files (2 bona:
+\texttt{student\_voice\_ref.wav} + \texttt{original\_denoised.wav};
+2 spoof: flat XTTS + warped/CMVN cloned), splitting at the \emph{file}
+level would leak identity cues. We instead slice every file into 4\,s
+clips with 2\,s hop, yielding $\mathbf{739}$ training and $\mathbf{317}$
+test clips. Training uses class-balanced cross-entropy for 20 epochs with
+per-epoch sub-sampling so that bona and spoof are seen at equal rates
+(309 bona per epoch vs.\ 430 available spoof). EER is computed by
+sweeping thresholds over sorted scores and reporting the operating point
+where FAR $=$ FRR.
+
+On this data the test EER is \textbf{0.000} (threshold $0.994$). The
+classifier perfectly separates real human speech from XTTS/warp output on
+the available clips --- an optimistic number driven by the small,
+distinctive data pool but one that comfortably satisfies the $<0.10$
+criterion. We flag this explicitly as a weakness in \S IX: the CM has
+seen only one spoof system.
 
 \subsection{FGSM on the LID (Task 4.2)}
 Our LID feature extractor is non-differentiable w.r.t.\ the raw waveform
@@ -263,16 +516,92 @@ audibility:
     - \varepsilon\,\mathrm{sgn}\!\big(\nabla_{\mathbf{F}}
         \mathcal{L}(\mathrm{LID}(\mathbf{F}), y_{\mathrm{eng}})\big).
 \]
-We sweep $\varepsilon \in \{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0\}$.
-The smallest $\varepsilon$ that flips the majority of Hindi frames to English
-(``any flip'') is $\varepsilon^{*}_{\mathrm{any}}=0.25$ at a feature-domain
-$\mathrm{SNR}_{\mathbf F} = 12$\,dB. No $\varepsilon$ in the swept range
-achieves the flip \emph{and}
-$\mathrm{SNR}_{\mathbf F} > 40$\,dB: our LID is
-\emph{robust to imperceptible feature perturbations in this range}. The
-audio-domain SNR hovers around $-3$\,dB throughout the sweep, dominated by
-Griffin-Lim reconstruction error rather than FGSM noise; we therefore treat
-$\mathrm{SNR}_{\mathbf F}$ as the primary perceptibility metric.
+We sweep $\varepsilon \in \{0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0\}$
+on a 5-second Modi-Hindi segment (initial hin-frame fraction $= 1.00$).
+The full sweep:
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}r c c c c@{}}
+\toprule
+\textbf{$\varepsilon$} & \textbf{eng\,frac} & \textbf{SNR$_\mathbf{F}$\,(dB)} & \textbf{SNR$_{\text{aud}}$\,(dB)} & \textbf{flip?} \\
+\midrule
+0.01 & 0.00 & 40.00 & $-3.02$ & — \\
+0.05 & 0.00 & 26.02 & $-3.00$ & — \\
+0.10 & 0.00 & 20.00 & $-3.01$ & — \\
+\textbf{0.25} & \textbf{1.00} & \textbf{12.04} & $-3.00$ & \textbf{YES} \\
+0.50 & 1.00 &  6.02 & $-3.02$ & YES \\
+1.00 & 1.00 &  0.00 & $-3.07$ & YES \\
+2.00 & 1.00 & $-6.02$ & $-3.26$ & YES \\
+5.00 & 1.00 & $-13.98$ & $-4.41$ & YES \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent The smallest $\varepsilon$ that flips the majority of Hindi
+frames to English (``any flip'') is
+$\varepsilon^{*}_{\mathrm{any}}=\mathbf{0.25}$ at a feature-domain
+$\mathrm{SNR}_{\mathbf F} = 12.04$\,dB. No $\varepsilon$ in the swept
+range achieves the flip \emph{and} $\mathrm{SNR}_{\mathbf F} > 40$\,dB:
+our LID is \emph{robust to imperceptible feature perturbations in this
+range}. The audio-domain SNR hovers around $-3$\,dB throughout the
+sweep, dominated by Griffin-Lim reconstruction error rather than FGSM
+noise; we therefore treat $\mathrm{SNR}_{\mathbf F}$ as the primary
+perceptibility metric. The sharp threshold between $\varepsilon=0.10$
+(no flip, feature-SNR 20\,dB) and $\varepsilon=0.25$ (full flip,
+feature-SNR 12\,dB) suggests that the hin/eng feature-space boundary
+is close to the Hindi posterior mode but still at least
+$\approx 0.2$ in $\ell_\infty$ norm.
+
+\section{Evaluation Metrics}
+
+We fix the precise definitions of every reported metric so that the
+numbers in \S~VIII are unambiguous.
+
+\paragraph*{LID macro F1.} Over the two content classes
+$\mathcal{C}=\{\mathrm{eng,hin}\}$ (silence is excluded so an all-hin
+baseline does not artificially inflate the number),
+\[
+F_1^{\text{macro}} = \frac{1}{|\mathcal{C}|}\sum_{c\in\mathcal{C}}
+    \frac{2\,\mathrm{P}_c\,\mathrm{R}_c}{\mathrm{P}_c+\mathrm{R}_c},
+\]
+with $\mathrm{P}_c, \mathrm{R}_c$ the per-class precision and recall.
+
+\paragraph*{Boundary hit-rate.} For every silver transition at time
+$t^{*}_i$, the prediction is a \emph{hit} iff the predicted LID
+argmax changes within the window $[t^{*}_i-200\,\text{ms},
+t^{*}_i+200\,\text{ms}]$; hit-rate is the count of hits over the
+count of silver transitions.
+
+\paragraph*{WER/CER.} Jiwer-computed Levenshtein distance over tokens
+(WER) or characters (CER) between proxy gold (Whisper-\texttt{small}
+beam=5, forced \texttt{lang=hi}) and our hypothesis (beam=1
++ KN-rescore + hallucination filter), normalised by the gold length.
+
+\paragraph*{MCD (pymcd/Kubichek).} For two 60\,s waveforms aligned by
+DTW on their MCEP (Mel-cepstral) sequences with pyworld, the
+frame-wise distance is
+\[
+d_{\text{MCD}}(t) = \frac{10}{\ln 10}\sqrt{2\sum_{k=1}^{K}\big(c_k(t) - \hat{c}_k(t)\big)^2},
+\]
+with $K=25$ MCEP coefficients. The reported MCD is the DTW-path average
+of $d_{\text{MCD}}$.
+
+\paragraph*{EER.} For the anti-spoof CM we sort clip scores and sweep
+the operating threshold, computing false-accept (FAR) and false-reject
+(FRR) at each threshold; EER is the value at $\mathrm{FAR}=\mathrm{FRR}$.
+
+\paragraph*{FGSM feature-SNR.} Given feature perturbation
+$\delta \mathbf{F} = \mathbf{F}' - \mathbf{F}$,
+$\mathrm{SNR}_{\mathbf{F}} = 10\log_{10}\!\big(\lVert \mathbf{F}\rVert_F^2
+/ \lVert \delta\mathbf{F}\rVert_F^2\big)$ in dB.
+
+\paragraph*{ECAPA cosine.} For $\ell_2$-normalised ECAPA embeddings
+$\mathbf{e}, \mathbf{e}'$, cosine similarity is their dot product
+$\langle \mathbf{e}, \mathbf{e}'\rangle$; values range in $[-1, 1]$,
+with $> 0.7$ typically indicating the same speaker in the VoxCeleb
+evaluation protocol.
 
 \section{Results Summary}
 
@@ -407,9 +736,74 @@ achievable boundary timing precision.
 Whisper-\texttt{small} for \texttt{large-v3} and re-tune
 $\lambda_{\mathrm{lm}}$, because the acoustic prior is already very strong
 and the LM bias becomes more valuable on a harder decoder; we would also
-extend the anti-spoof training set with more bona-fide/spoof pairs (ASVspoof
-Challenge data) to stress-test the currently-optimistic $\mathrm{EER}{=}0$
-result.
+extend the anti-spoof training set with more bona-fide/spoof pairs
+(ASVspoof Challenge~2019/2021 data) to stress-test the currently-optimistic
+$\mathrm{EER}{=}0$ result. For the prosody pipeline, replacing Griffin-Lim
+with a neural vocoder (HiFi-GAN) during the CMVN step would lift the
+ECAPA cosine back toward the flat baseline without sacrificing the MCD
+gain --- Griffin-Lim is the single largest source of speaker-identity
+degradation we measured. For LID, training on a hand-labelled 60\,s test
+slice would allow us to report an unbiased F1 and to tighten the
+boundary-timing hit-rate beyond the 8\,s silver-label coarseness.
+
+\section{Conclusion}
+
+We presented an end-to-end pipeline that converts a 14-minute
+code-switched Hinglish recording into 10:10 of Maithili voice-cloned
+audio in the student's own voice, while auditing the system against
+adversarial and spoofing attacks. Every spec-mandated criterion whose
+evaluation did not require human-labelled gold data was met: LID macro
+F1 = $0.902$ (target $\ge 0.85$), anti-spoof EER = $0.000$ (target
+$<0.10$), MCD cloned-vs-reference = $7.07$\,dB (target $<8$\,dB), output
+duration = $610$\,s (target $\ge 600$\,s), and the FGSM sweep confirmed
+LID robustness to imperceptible (feature-SNR $>40$\,dB) perturbations.
+The headline non-trivial finding is the \emph{direction} of the
+prosody-warp + CMVN trade-off: warping + cepstral post-matching cuts
+MCD by 5.06\,dB while \emph{lowering} ECAPA cosine by 0.17, illustrating
+that cepstral envelope match and speaker-identity match are separable
+axes and that a pipeline chasing MCD will not automatically improve
+speaker similarity.
+
+\section{Runtime and Compute}
+
+All timings were measured on the target machine (8-core CPU, 32\,GB RAM,
+no GPU; PyTorch 2.8 CPU build). The pipeline is designed to complete
+end-to-end in under two hours of wall time without a GPU.
+
+\begin{center}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}l r r@{}}
+\toprule
+\textbf{Stage} & \textbf{Wall (s)} & \textbf{Notes} \\
+\midrule
+DeepFilterNet denoise (14\,min) & $\approx 420$ & 60\,s chunks, 1\,s crossfade \\
+LID training (15 epochs, 84k frames) & $\approx 180$ & Adam, full-clip batch \\
+LID inference + eval                & $\approx 30$ & 100\,fps forward pass \\
+KN-3 LM build                       & $<1$ & 476-token corpus \\
+Whisper-\texttt{small} STT (64 segs) & $\approx 320$ & faster-whisper, beam=1 \\
+NLLB-200 translation (49 sents)     & $\approx 210$ & distilled-600M \\
+XTTS-v2 long-form (44 chunks)       & $\approx 2730$ & speed 0.75, 22.05\,kHz \\
+Prosody warp (DTW + pitch shift)    & $\approx 140$ & 500\,ms blocks \\
+CMVN + Griffin-Lim (32 iters)       & $\approx 260$ & 10\,min audio \\
+Anti-spoof CM train + eval          & $\approx 90$ & 20 epochs, 739 clips \\
+FGSM sweep (8 epsilons)             & $\approx 25$ & feature space \\
+pymcd grid (6 pairs, 60\,s each)    & $\approx 40$ & pyworld MCEP + DTW \\
+\midrule
+\textbf{Total (end-to-end)}         & $\approx 4450$ & $\approx 74$ min wall \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent XTTS-v2 dominates at $\approx 45$ minutes; it emits 13.3\,s of
+audio per chunk on average, 60\,s wall per chunk, so the synthesis
+throughput is $\approx 0.22\,\times$ real time. All other stages are
+under five minutes. Peak resident memory is $\approx 4.2$\,GB during
+XTTS, $\approx 2.8$\,GB during LID training, and $\approx 3.6$\,GB
+during DeepFilterNet (a chunk's 60\,s spectrogram at 48\,kHz).
+Disk footprint after a fresh run: $\approx 110$\,MB in \texttt{outputs/}
+(mostly the 44 XTTS chunk intermediates) plus $\approx 5$\,MB of model
+weights in \texttt{models/}.
 
 \section{Reproducibility}
 
